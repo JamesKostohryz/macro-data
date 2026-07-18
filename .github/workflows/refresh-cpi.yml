@@ -1,0 +1,40 @@
+name: Refresh CPI data
+
+# Runs on GitHub's servers (which have open internet, unlike the Cowork sandbox).
+# Fetches CPI history from BLS/FRED and commits data/cpi_series.json when it changes.
+
+on:
+  workflow_dispatch:            # lets you run it on demand from the Actions tab
+  schedule:
+    - cron: "20 13 * * *"       # daily 13:20 UTC; commits only when the data actually changes
+
+permissions:
+  contents: write               # allows the job to commit the refreshed data back
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch CPI series
+        env:
+          BLS_API_KEY:  ${{ secrets.BLS_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python pipeline/fetch_data.py
+
+      - name: Commit refreshed data
+        run: |
+          git config user.name  "cpi-data-bot"
+          git config user.email "cpi-data-bot@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "data: refresh CPI series ($(date -u +%Y-%m-%d))"
+            git push
+          fi
