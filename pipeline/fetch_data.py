@@ -30,7 +30,7 @@ import os, json, time, urllib.request, urllib.error, datetime
 BLS_URL  = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 FRED_OBS = "https://api.stlouisfed.org/fred/series/observations"
 OUT_PATH = "data/cpi_series.json"
-START_YEAR = 1990          # deep enough for stable percentile history; widen if desired
+START_YEAR = 1947          # each series pulls from its actual FRED start; full available history
 
 # name -> ids. bls_sa/bls_nsa are BLS series IDs; fred_sa/fred_nsa are FRED series IDs.
 # "constructed" nodes are derived by the engine from other nodes (no direct series).
