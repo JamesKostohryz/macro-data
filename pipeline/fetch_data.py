@@ -75,10 +75,10 @@ def bls_fetch(series_ids, start, end, key):
         out[s["seriesID"]] = sorted(rows)
     return out
 
-def bls_series(series_id, key):
+def bls_series(series_id, key, start_year=START_YEAR):
     now = datetime.date.today().year
     acc = {}
-    y = START_YEAR
+    y = start_year
     while y <= now:                      # <=20-year windows
         end = min(y+19, now)
         for attempt in range(3):
@@ -106,21 +106,29 @@ def fred_series(series_id, key):
 
 # --------------------------------------------------------------------------- driver
 def get_one(ids, kind, bls_key, fred_key):
-    """kind = 'sa' or 'nsa'. Try BLS, fall back to FRED."""
-    bls_id, fred_id = ids.get(f"bls_{kind}"), ids.get(f"fred_{kind}")
-    if bls_id:
+    """kind='sa'|'nsa'. FRED supplies the long history in one reliable call; BLS
+    overlays the most recent ~2 years (authoritative + fresh for release day) and
+    wins on any overlapping month. If FRED is unavailable, BLS does the full history
+    as a fallback. Either source is allowed to fail without sinking the series."""
+    now = datetime.date.today().year
+    fred_id, bls_id = ids.get(f"fred_{kind}"), ids.get(f"bls_{kind}")
+    m, src = {}, []
+    if fred_id and fred_key:
         try:
-            rows = bls_series(bls_id, bls_key)
-            if rows: return rows, f"BLS:{bls_id}"
-        except Exception as e:
-            log(f"    BLS failed for {bls_id}: {e}")
-    if fred_id:
-        try:
-            rows = fred_series(fred_id, fred_key)
-            if rows: return rows, f"FRED:{fred_id}"
+            for r in fred_series(fred_id, fred_key): m[r["date"]] = r["value"]
+            if m: src.append(f"FRED:{fred_id}")
         except Exception as e:
             log(f"    FRED failed for {fred_id}: {e}")
-    return [], "NONE"
+    if bls_id:
+        try:
+            start = (now - 2) if m else START_YEAR      # fresh tail if FRED gave history; else full
+            got = bls_series(bls_id, bls_key, start_year=start)
+            for r in got: m[r["date"]] = r["value"]     # BLS wins on overlap
+            if got: src.append(f"BLS:{bls_id}")
+        except Exception as e:
+            log(f"    BLS failed for {bls_id}: {e}")
+    rows = [{"date":k, "value":m[k]} for k in sorted(m)]
+    return rows, "+".join(src) or "NONE"
 
 def main():
     bls_key  = os.environ.get("BLS_API_KEY", "").strip()
@@ -138,7 +146,8 @@ def main():
         nsa, nsa_src = get_one(ids, "nsa", bls_key, fred_key)
         out["series"][name] = {"sa": sa, "nsa": nsa, "sa_source": sa_src, "nsa_source": nsa_src,
                                "ids": ids}
-        log(f"    SA {len(sa):>4} pts ({sa_src})   NSA {len(nsa):>4} pts ({nsa_src})")
+        lt = sa[-1]["date"] if sa else "—"
+        log(f"    SA {len(sa):>4} pts to {lt} ({sa_src})   NSA {len(nsa):>4} pts ({nsa_src})")
 
     os.makedirs("data", exist_ok=True)
     with open(OUT_PATH, "w") as f:
