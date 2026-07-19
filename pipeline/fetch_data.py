@@ -53,7 +53,7 @@ def bls_fetch(series_ids, start, end, key):
     if key: body["registrationkey"] = key
     req = urllib.request.Request(BLS_URL, data=json.dumps(body).encode(),
                                  headers={"Content-Type":"application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:
         d = json.load(r)
     if d.get("status") != "REQUEST_SUCCEEDED":
         raise RuntimeError(f"BLS: {d.get('status')} {d.get('message')}")
@@ -86,7 +86,7 @@ def bls_series(series_id, key, start_year=START_YEAR):
 def fred_series(series_id, key):
     if not key: return []
     url = f"{FRED_OBS}?series_id={series_id}&api_key={key}&file_type=json&observation_start={START_YEAR}-01-01"
-    with urllib.request.urlopen(url, timeout=60) as r:
+    with urllib.request.urlopen(url, timeout=30) as r:
         d = json.load(r)
     rows = []
     for o in d.get("observations", []):
@@ -134,10 +134,17 @@ def main():
         lt = sa[-1]["date"] if sa else "—"
         log(f"    SA {len(sa):>4} pts to {lt} ({sa_src})   NSA {len(nsa):>4} pts ({nsa_src})")
 
+    n = sum(1 for v in out["series"].values() if v["sa"])
+    # Safety valve: never overwrite good data with a degraded/empty fetch (e.g. a
+    # transient BLS/FRED outage). Require the headline series plus a healthy count.
+    MIN_OK = 20
+    if n < MIN_OK or not out["series"].get("All Items", {}).get("sa"):
+        log(f"\nABORT: only {n}/{len(allmap)} series resolved (need >= {MIN_OK} and 'All Items' present).")
+        log("Refusing to overwrite data/cpi_series.json — leaving existing data intact.")
+        raise SystemExit(1)
     os.makedirs("data", exist_ok=True)
     with open(OUT_PATH, "w") as f:
         json.dump(out, f, separators=(",", ":"))
-    n = sum(1 for v in out["series"].values() if v["sa"])
     log(f"\nWrote {OUT_PATH}: {n}/{len(allmap)} series with SA history.")
 
 if __name__ == "__main__":
