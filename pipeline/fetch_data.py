@@ -4,26 +4,13 @@ fetch_data.py — pull CPI history for the economic-release-report engine.
 
 Runs on GitHub Actions (which has open internet), NOT in the Cowork sandbox.
 It fetches seasonally-adjusted (SA) and not-seasonally-adjusted (NSA) monthly index
-levels for the CPI aggregate tree, full history, from the BLS Public Data API
-(primary) with FRED as a fallback. Output is written to data/cpi_series.json, which
-the report engine reads (via raw GitHub) to compute annualized rates, percentile
-ranks, YoY, and the attribution tables.
+levels for the CPI aggregate tree plus detailed item strata, full history, from FRED
+(primary, one call) with BLS overlaying the fresh recent months. Output is written to
+data/cpi_series.json, which the report engine reads (via raw GitHub).
 
 Auth (set as repo secrets, injected as env vars by the workflow):
-    BLS_API_KEY   — from https://data.bls.gov/registrationEngine/  (registration key)
+    BLS_API_KEY   — from https://data.bls.gov/registrationEngine/
     FRED_API_KEY  — from https://fredaccount.stlouisfed.org/apikeys
-
-Design notes:
-  * BLS v2 allows 50 series and 20 years per request, 500 requests/day. We window the
-    history in <=20-year chunks and batch series.
-  * Every series lists BOTH a BLS id and a FRED id. If BLS fails for a series (bad id,
-    rate limit, outage), we fall back to FRED so a single bad id never sinks the run.
-  * The script is defensive and idempotent: it logs per-series success/failure and
-    writes whatever it got. The Action commits only if the data actually changed.
-
-This v1 covers the AGGREGATE TREE (enough to lock the percentile window and drive
-Figures 1–3 live, plus sparklines). The ~200 detailed item series behind Figures 4–6
-are a documented follow-up (see DETAIL_ITEMS below — expand and re-run).
 """
 import os, json, time, urllib.request, urllib.error, datetime
 
@@ -32,8 +19,6 @@ FRED_OBS = "https://api.stlouisfed.org/fred/series/observations"
 OUT_PATH = "data/cpi_series.json"
 START_YEAR = 1947          # each series pulls from its actual FRED start; full available history
 
-# name -> ids. bls_sa/bls_nsa are BLS series IDs; fred_sa/fred_nsa are FRED series IDs.
-# "constructed" nodes are derived by the engine from other nodes (no direct series).
 AGG_TREE = {
     "All Items":           {"bls_sa":"CUSR0000SA0",     "bls_nsa":"CUUR0000SA0",     "fred_sa":"CPIAUCSL",       "fred_nsa":"CPIAUCNS"},
     "Core":                {"bls_sa":"CUSR0000SA0L1E",  "bls_nsa":"CUUR0000SA0L1E",  "fred_sa":"CPILFESL",       "fred_nsa":"CPILFENS"},
@@ -42,28 +27,20 @@ AGG_TREE = {
     "Core Goods":          {"bls_sa":"CUSR0000SACL1E",  "bls_nsa":"CUUR0000SACL1E",  "fred_sa":"CUSR0000SACL1E", "fred_nsa":"CUUR0000SACL1E"},
     "Core Services":       {"bls_sa":"CUSR0000SASLE",   "bls_nsa":"CUUR0000SASLE",   "fred_sa":"CUSR0000SASLE",  "fred_nsa":"CUUR0000SASLE"},
     "Housing Services":    {"bls_sa":"CUSR0000SAH1",    "bls_nsa":"CUUR0000SAH1",    "fred_sa":"CUSR0000SAH1",   "fred_nsa":"CUUR0000SAH1"},
-    # For super-core (core services ex-housing) the engine constructs the series from
-    # Core Services and Housing Services using the relative-importance weights.
     "Owners Equiv Rent":   {"bls_sa":"CUSR0000SEHC",    "bls_nsa":"CUUR0000SEHC",    "fred_sa":"CUSR0000SEHC",   "fred_nsa":"CUUR0000SEHC"},
     "Rent Primary Res":    {"bls_sa":"CUSR0000SEHA",    "bls_nsa":"CUUR0000SEHA",    "fred_sa":"CUSR0000SEHA",   "fred_nsa":"CUUR0000SEHA"},
 }
 
-# Detailed item strata behind Figures 4-6 (top contributors / movers). Curated set of
-# the major components (confident BLS item codes); expand as live runs confirm more.
-# BLS item code -> series CUSR0000<code> (SA) / CUUR0000<code> (NSA). FRED mirrors these.
 def _ids(code): return {"bls_sa":f"CUSR0000{code}","bls_nsa":f"CUUR0000{code}",
                         "fred_sa":f"CUSR0000{code}","fred_nsa":f"CUUR0000{code}"}
 DETAIL_ITEMS = {n:_ids(c) for n,c in {
-    # --- core services ---
     "Owner's equivalent rent":"SEHC", "Rent of primary residence":"SEHA",
     "Lodging away from home":"SEHB", "Airline fares":"SETG01",
     "Motor vehicle insurance":"SETE", "Motor vehicle maintenance and repair":"SETD",
     "Physicians' services":"SEMC01", "Hospital services":"SEMD01",
     "Water, sewer and trash":"SEHG", "Tobacco and smoking products":"SEGA",
-    # --- core goods ---
     "New vehicles":"SETA01", "Used cars and trucks":"SETA02", "Apparel":"SAA",
     "Medical care commodities":"SAM1", "Alcoholic beverages":"SAF116",
-    # --- non-core (food & energy) — for Top Movers ---
     "Gasoline (all types)":"SETB01", "Electricity":"SEHF01",
     "Utility (piped) gas service":"SEHF02", "Fuel oil":"SEHE01",
     "Food at home":"SAF11", "Food away from home":"SEFV",
@@ -71,9 +48,7 @@ DETAIL_ITEMS = {n:_ids(c) for n,c in {
 
 def log(m): print(m, flush=True)
 
-# --------------------------------------------------------------------------- BLS
 def bls_fetch(series_ids, start, end, key):
-    """Return {series_id: [(YYYY-MM, value), ...]} for a batch/window via BLS v2."""
     body = {"seriesid": series_ids, "startyear": str(start), "endyear": str(end)}
     if key: body["registrationkey"] = key
     req = urllib.request.Request(BLS_URL, data=json.dumps(body).encode(),
@@ -95,7 +70,7 @@ def bls_series(series_id, key, start_year=START_YEAR):
     now = datetime.date.today().year
     acc = {}
     y = start_year
-    while y <= now:                      # <=20-year windows
+    while y <= now:
         end = min(y+19, now)
         for attempt in range(3):
             try:
@@ -108,7 +83,6 @@ def bls_series(series_id, key, start_year=START_YEAR):
         y = end + 1
     return [{"date":k, "value":acc[k]} for k in sorted(acc)]
 
-# --------------------------------------------------------------------------- FRED
 def fred_series(series_id, key):
     if not key: return []
     url = f"{FRED_OBS}?series_id={series_id}&api_key={key}&file_type=json&observation_start={START_YEAR}-01-01"
@@ -120,12 +94,7 @@ def fred_series(series_id, key):
             rows.append({"date": o["date"][:7], "value": float(o["value"])})
     return rows
 
-# --------------------------------------------------------------------------- driver
 def get_one(ids, kind, bls_key, fred_key):
-    """kind='sa'|'nsa'. FRED supplies the long history in one reliable call; BLS
-    overlays the most recent ~2 years (authoritative + fresh for release day) and
-    wins on any overlapping month. If FRED is unavailable, BLS does the full history
-    as a fallback. Either source is allowed to fail without sinking the series."""
     now = datetime.date.today().year
     fred_id, bls_id = ids.get(f"fred_{kind}"), ids.get(f"bls_{kind}")
     m, src = {}, []
@@ -137,9 +106,9 @@ def get_one(ids, kind, bls_key, fred_key):
             log(f"    FRED failed for {fred_id}: {e}")
     if bls_id:
         try:
-            start = (now - 2) if m else START_YEAR      # fresh tail if FRED gave history; else full
+            start = (now - 2) if m else START_YEAR
             got = bls_series(bls_id, bls_key, start_year=start)
-            for r in got: m[r["date"]] = r["value"]     # BLS wins on overlap
+            for r in got: m[r["date"]] = r["value"]
             if got: src.append(f"BLS:{bls_id}")
         except Exception as e:
             log(f"    BLS failed for {bls_id}: {e}")
