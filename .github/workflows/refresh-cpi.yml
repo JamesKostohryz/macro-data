@@ -7,6 +7,10 @@ on:
   workflow_dispatch:            # lets you run it on demand from the Actions tab
   schedule:
     - cron: "20 13 * * *"       # daily 13:20 UTC; commits only when the data actually changes
+  push:
+    branches: [main]
+    paths:
+      - "pipeline/**"           # auto-run when the fetch logic changes (so a code push refreshes data)
 
 permissions:
   contents: write               # allows the job to commit the refreshed data back
