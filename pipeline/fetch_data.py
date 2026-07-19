@@ -136,6 +136,11 @@ def main():
     fred_key = os.environ.get("FRED_API_KEY", "").strip()
     if not bls_key:  log("WARN: BLS_API_KEY not set — will rely on FRED.")
     if not fred_key: log("WARN: FRED_API_KEY not set — no fallback if BLS fails.")
+    # SAFE key fingerprint (never prints the key): length + sha256 prefix, so we can tell
+    # exactly which value the job received and whether the two secrets are swapped/duplicated.
+    import hashlib
+    def _fp(s): return "EMPTY" if not s else f"len={len(s)} sha8={hashlib.sha256(s.encode()).hexdigest()[:8]}"
+    log(f"KEY DIAG: BLS_API_KEY {_fp(bls_key)} | FRED_API_KEY {_fp(fred_key)} | same={bool(bls_key) and bls_key==fred_key}")
 
     out = {"meta": {"generated_utc": datetime.datetime.utcnow().isoformat()+"Z",
                     "start_year": START_YEAR, "release": "CPI"},
