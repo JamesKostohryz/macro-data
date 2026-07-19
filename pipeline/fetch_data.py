@@ -48,10 +48,26 @@ AGG_TREE = {
     "Rent Primary Res":    {"bls_sa":"CUSR0000SEHA",    "bls_nsa":"CUUR0000SEHA",    "fred_sa":"CUSR0000SEHA",   "fred_nsa":"CUUR0000SEHA"},
 }
 
-# Follow-up: the ~200 detailed strata behind Figures 4-6 (top contributors / movers).
-# Left empty in v1 on purpose — we validate the aggregate ids on the first run, then
-# expand this with the confirmed detail ids (BLS item codes like SETG01 = airline fares).
-DETAIL_ITEMS = {}
+# Detailed item strata behind Figures 4-6 (top contributors / movers). Curated set of
+# the major components (confident BLS item codes); expand as live runs confirm more.
+# BLS item code -> series CUSR0000<code> (SA) / CUUR0000<code> (NSA). FRED mirrors these.
+def _ids(code): return {"bls_sa":f"CUSR0000{code}","bls_nsa":f"CUUR0000{code}",
+                        "fred_sa":f"CUSR0000{code}","fred_nsa":f"CUUR0000{code}"}
+DETAIL_ITEMS = {n:_ids(c) for n,c in {
+    # --- core services ---
+    "Owner's equivalent rent":"SEHC", "Rent of primary residence":"SEHA",
+    "Lodging away from home":"SEHB", "Airline fares":"SETG01",
+    "Motor vehicle insurance":"SETE", "Motor vehicle maintenance and repair":"SETD",
+    "Physicians' services":"SEMC01", "Hospital services":"SEMD01",
+    "Water, sewer and trash":"SEHG", "Tobacco and smoking products":"SEGA",
+    # --- core goods ---
+    "New vehicles":"SETA01", "Used cars and trucks":"SETA02", "Apparel":"SAA",
+    "Medical care commodities":"SAM1", "Alcoholic beverages":"SAF116",
+    # --- non-core (food & energy) — for Top Movers ---
+    "Gasoline (all types)":"SETB01", "Electricity":"SEHF01",
+    "Utility (piped) gas service":"SEHF02", "Fuel oil":"SEHE01",
+    "Food at home":"SAF11", "Food away from home":"SEFV",
+}.items()}
 
 def log(m): print(m, flush=True)
 
