@@ -48,6 +48,8 @@ DETAIL_ITEMS = {n:_ids(c) for n,c in {
 
 def log(m): print(m, flush=True)
 
+_STATE = {"bls_dead": False}  # once BLS returns an invalid-key/quota error, stop hammering it this run
+
 def bls_fetch(series_ids, start, end, key):
     body = {"seriesid": series_ids, "startyear": str(start), "endyear": str(end)}
     if key: body["registrationkey"] = key
@@ -69,6 +71,8 @@ def bls_fetch(series_ids, start, end, key):
 def bls_series(series_id, key, start_year=START_YEAR):
     now = datetime.date.today().year
     acc = {}
+    if _STATE["bls_dead"]:
+        return []
     y = start_year
     while y <= now:
         end = min(y+19, now)
@@ -78,6 +82,12 @@ def bls_series(series_id, key, start_year=START_YEAR):
                 for k, v in got.get(series_id, []): acc[k] = v
                 break
             except Exception as e:
+                msg = str(e)
+                if "REQUEST_NOT_PROCESSED" in msg or "invalid" in msg.lower() or "threshold" in msg.lower():
+                    if not _STATE["bls_dead"]:
+                        log(f"    BLS unusable this run (key invalid or quota exhausted): {msg[:150]}")
+                    _STATE["bls_dead"] = True
+                    return [{"date": k, "value": acc[k]} for k in sorted(acc)]
                 log(f"    BLS {series_id} {y}-{end} try{attempt+1}: {e}")
                 time.sleep(2)
         y = end + 1
@@ -103,7 +113,13 @@ def get_one(ids, kind, bls_key, fred_key):
             for r in fred_series(fred_id, fred_key): m[r["date"]] = r["value"]
             if m: src.append(f"FRED:{fred_id}")
         except Exception as e:
-            log(f"    FRED failed for {fred_id}: {e}")
+            detail = ""
+            try:
+                if isinstance(e, urllib.error.HTTPError):
+                    detail = " | FRED says: " + e.read().decode("utf-8", "replace")[:200].replace(chr(10), " ")
+            except Exception:
+                pass
+            log(f"    FRED failed for {fred_id}: {e}{detail}")
     if bls_id:
         try:
             start = (now - 2) if m else START_YEAR
