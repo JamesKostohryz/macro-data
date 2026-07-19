@@ -48,7 +48,8 @@ DETAIL_ITEMS = {n:_ids(c) for n,c in {
 
 def log(m): print(m, flush=True)
 
-_STATE = {"bls_dead": False}  # once BLS returns an invalid-key/quota error, stop hammering it this run
+_STATE = {"bls_dead": False,  # once BLS returns an invalid-key/quota error, stop hammering it this run
+          "errors": []}       # collected fetch problems, written into the output so they're committed
 
 def bls_fetch(series_ids, start, end, key):
     body = {"seriesid": series_ids, "startyear": str(start), "endyear": str(end)}
@@ -85,7 +86,10 @@ def bls_series(series_id, key, start_year=START_YEAR):
         for attempt in range(3):
             try:
                 got = bls_fetch([series_id], a, b, key)
-                for k, v in got.get(series_id, []): acc[k] = v
+                rows = got.get(series_id, [])
+                for k, v in rows: acc[k] = v
+                if not rows:
+                    _STATE["errors"].append(f"BLS {series_id} {a}-{b}: request OK but returned NO DATA")
                 break
             except Exception as e:
                 msg = str(e)
@@ -94,6 +98,7 @@ def bls_series(series_id, key, start_year=START_YEAR):
                         log(f"    BLS unusable this run (key invalid or quota exhausted): {msg[:150]}")
                     _STATE["bls_dead"] = True
                     return [{"date": k, "value": acc[k]} for k in sorted(acc)]
+                _STATE["errors"].append(f"BLS {series_id} {a}-{b} try{attempt+1}: {msg[:160]}")
                 log(f"    BLS {series_id} {a}-{b} try{attempt+1}: {e}")
                 time.sleep(2)
     return [{"date":k, "value":acc[k]} for k in sorted(acc)]
@@ -124,6 +129,7 @@ def get_one(ids, kind, bls_key, fred_key):
                     detail = " | FRED says: " + e.read().decode("utf-8", "replace")[:200].replace(chr(10), " ")
             except Exception:
                 pass
+            _STATE["errors"].append(f"FRED {fred_id}: {str(e)[:100]}{detail[:160]}")
             log(f"    FRED failed for {fred_id}: {e}{detail}")
     if bls_id:
         try:
@@ -168,6 +174,7 @@ def main():
         log(f"\nABORT: only {n}/{len(allmap)} series resolved (need >= {MIN_OK} and 'All Items' present).")
         log("Refusing to overwrite data/cpi_series.json — leaving existing data intact.")
         raise SystemExit(1)
+    out["meta"]["diagnostics"] = _STATE["errors"][:400]
     os.makedirs("data", exist_ok=True)
     with open(OUT_PATH, "w") as f:
         json.dump(out, f, separators=(",", ":"))
