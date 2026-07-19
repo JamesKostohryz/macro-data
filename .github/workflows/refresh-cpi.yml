@@ -38,7 +38,18 @@ jobs:
           git add data/
           if git diff --staged --quiet; then
             echo "No data changes."
-          else
-            git commit -m "data: refresh CPI series ($(date -u +%Y-%m-%d))"
-            git push
+            exit 0
           fi
+          git commit -m "data: refresh CPI series ($(date -u +%Y-%m-%d))"
+          # main may have advanced while this run was fetching; rebase and retry so a
+          # concurrent push (e.g. a pipeline change) never sinks the data commit.
+          for attempt in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin main; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push attempt $attempt rejected; refreshing and retrying..."
+            sleep 5
+          done
+          echo "Failed to push refreshed data after 5 attempts." >&2
+          exit 1
