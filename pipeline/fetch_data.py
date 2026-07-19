@@ -55,7 +55,7 @@ def bls_fetch(series_ids, start, end, key):
     if key: body["registrationkey"] = key
     req = urllib.request.Request(BLS_URL, data=json.dumps(body).encode(),
                                  headers={"Content-Type":"application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=90) as r:
         d = json.load(r)
     if d.get("status") != "REQUEST_SUCCEEDED":
         raise RuntimeError(f"BLS: {d.get('status')} {d.get('message')}")
@@ -73,12 +73,18 @@ def bls_series(series_id, key, start_year=START_YEAR):
     acc = {}
     if _STATE["bls_dead"]:
         return []
+    windows = []
     y = start_year
     while y <= now:
-        end = min(y+19, now)
+        end = min(y + 9, now)          # 10-yr windows: lighter requests, far less timeout-prone
+        windows.append((y, end))
+        y = end + 1
+    # NEWEST FIRST: the recent months are what the report needs. If an old window fails we
+    # lose deep history; if the newest failed first (as it did) we'd ship 20-year-stale data.
+    for (a, b) in reversed(windows):
         for attempt in range(3):
             try:
-                got = bls_fetch([series_id], y, end, key)
+                got = bls_fetch([series_id], a, b, key)
                 for k, v in got.get(series_id, []): acc[k] = v
                 break
             except Exception as e:
@@ -88,9 +94,8 @@ def bls_series(series_id, key, start_year=START_YEAR):
                         log(f"    BLS unusable this run (key invalid or quota exhausted): {msg[:150]}")
                     _STATE["bls_dead"] = True
                     return [{"date": k, "value": acc[k]} for k in sorted(acc)]
-                log(f"    BLS {series_id} {y}-{end} try{attempt+1}: {e}")
+                log(f"    BLS {series_id} {a}-{b} try{attempt+1}: {e}")
                 time.sleep(2)
-        y = end + 1
     return [{"date":k, "value":acc[k]} for k in sorted(acc)]
 
 def fred_series(series_id, key):
