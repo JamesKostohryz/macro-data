@@ -9,16 +9,22 @@ on:
   workflow_dispatch:
   schedule:
     # CPI prints 8:30 ET. GitHub cron is ALWAYS UTC, but 8:30 ET is 12:30 UTC in summer
-    # (EDT) and 13:30 UTC in winter (EST) — so we fire repeatedly across both windows and
-    # take whichever run first sees fresh data. Repeat runs are free: save_guarded skips
-    # the write when the series hash is unchanged, so a no-op run commits nothing.
-    # GitHub's scheduler also routinely lags 5-15 min under load, which these absorb.
-    - cron: "40 12 10-15 * *"   # 12:40 UTC — 10 min after a summer (EDT) release
-    - cron: "55 12 10-15 * *"   # 12:55 UTC
-    - cron: "15 13 10-15 * *"   # 13:15 UTC
-    - cron: "40 13 10-15 * *"   # 13:40 UTC — 10 min after a winter (EST) release
-    - cron: "55 13 10-15 * *"   # 13:55 UTC
-    - cron: "15 14 10-15 * *"   # 14:15 UTC — final safety net
+    # (EDT) and 13:30 UTC in winter (EST) — so we fire across BOTH windows and take
+    # whichever run first sees fresh data. Starting ~2 min after the print and repeating
+    # every ~8 min: BLS updates cu.data.0.Current on its own schedule, and GitHub's
+    # scheduler routinely lags 5-15 min under load, so the earliest crons will often be
+    # no-ops. That is fine — save_guarded skips the write when the series hash is
+    # unchanged, so a run that finds nothing new commits nothing and costs nothing.
+    - cron: "32 12 10-15 * *"   # summer (EDT): ~2 min after the print
+    - cron: "40 12 10-15 * *"
+    - cron: "48 12 10-15 * *"
+    - cron: "56 12 10-15 * *"
+    - cron: "10 13 10-15 * *"
+    - cron: "32 13 10-15 * *"   # winter (EST): ~2 min after the print
+    - cron: "40 13 10-15 * *"
+    - cron: "48 13 10-15 * *"
+    - cron: "56 13 10-15 * *"
+    - cron: "10 14 10-15 * *"   # final safety net
 
 permissions:
   contents: write
