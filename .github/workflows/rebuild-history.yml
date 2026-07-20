@@ -1,0 +1,36 @@
+name: Rebuild CPI history (full, keyless)
+
+# The deliberate "heavy" job: full keyless rebuild of the master (grabs everything,
+# absorbs revisions). Keyless (FRED CSV + BLS flat file) so no secret can break it.
+# Runs weekly, after the Feb seasonal revision, on manual dispatch, and on any change
+# to the pipeline code (so a commit auto-validates itself — the run is cheap now).
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["pipeline/**"]
+  schedule:
+    - cron: "17 8 * * 0"     # weekly, Sunday 08:17 UTC
+    - cron: "23 9 5 3 *"     # annual, ~Mar 5 (after BLS's February seasonal revision)
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Full history rebuild
+        env:
+          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+        run: python pipeline/rebuild_history.py
+      - name: Commit if changed
+        run: |
+          git config user.name  "cpi-data-bot"
+          git config user.email "cpi-data-bot@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then echo "No change."; else
+            git commit -m "data: full history rebuild ($(date -u +%F))"; git push; fi

@@ -1,0 +1,34 @@
+name: Refresh CPI (release-day patch, keyless)
+
+# The light, timely job: on CPI release morning (before FRED catches up) pull the BLS
+# bulk flat file and patch the newest month(s) into the existing master. Guarded so it
+# can only patch a deep master, never manufacture a shallow one. Keyless.
+# Requires rebuild-history to have produced the master at least once first.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "45 13 10-15 * *"   # mid-month release window, 13:45 UTC (~8:45 ET);
+                                # idempotent + commits only on change, so daily is fine
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Release-day patch
+        env:
+          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+        run: python pipeline/fetch_release.py
+      - name: Commit if changed
+        run: |
+          git config user.name  "cpi-data-bot"
+          git config user.email "cpi-data-bot@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then echo "No change."; else
+            git commit -m "data: release patch ($(date -u +%F))"; git push; fi
