@@ -8,8 +8,17 @@ name: Refresh CPI (release-day patch, keyless)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "45 13 10-15 * *"   # mid-month release window, 13:45 UTC (~8:45 ET);
-                                # idempotent + commits only on change, so daily is fine
+    # CPI prints 8:30 ET. GitHub cron is ALWAYS UTC, but 8:30 ET is 12:30 UTC in summer
+    # (EDT) and 13:30 UTC in winter (EST) — so we fire repeatedly across both windows and
+    # take whichever run first sees fresh data. Repeat runs are free: save_guarded skips
+    # the write when the series hash is unchanged, so a no-op run commits nothing.
+    # GitHub's scheduler also routinely lags 5-15 min under load, which these absorb.
+    - cron: "40 12 10-15 * *"   # 12:40 UTC — 10 min after a summer (EDT) release
+    - cron: "55 12 10-15 * *"   # 12:55 UTC
+    - cron: "15 13 10-15 * *"   # 13:15 UTC
+    - cron: "40 13 10-15 * *"   # 13:40 UTC — 10 min after a winter (EST) release
+    - cron: "55 13 10-15 * *"   # 13:55 UTC
+    - cron: "15 14 10-15 * *"   # 14:15 UTC — final safety net
 
 permissions:
   contents: write
