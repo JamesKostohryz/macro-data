@@ -57,4 +57,43 @@ ok, why = C.guard(shallow); check(f"guard: REJECTS shallow All Items ({why})", n
 sparse = {"series": {"All Items": {"sa": [{"date": str(1947+i//12)+f"-{i%12+1:02d}", "value": 1.0} for i in range(600)]}}}
 ok, why = C.guard(sparse); check(f"guard: REJECTS too-few-series ({why})", not ok)
 
-print("\nALL TESTS PASSED — parsing, merge, and anti-clobber guard are proven.")
+# --- multi-file history merge: same series in several files must NOT duplicate --------
+# All Items really does appear in AllItems, Summaries and CommoditiesServicesSpecial;
+# concatenating instead of merging would triple every month. Also proves one bad file
+# is survivable and gets recorded rather than swallowed.
+_FILES = {
+    "f_a": ("CUSR0000SA0\t2026\tM05\t320.100\t\n"
+            "CUSR0000SA0\t2026\tM06\t320.900\t\n"),
+    "f_b": ("CUSR0000SA0\t2026\tM06\t320.900\t\n"     # duplicate month, same value
+            "CUSR0000SA0\t2026\tM07\t321.400\t\n"),   # and one genuinely new month
+    "f_bad": None,                                     # simulates a download failure
+}
+_orig_http_get = C.http_get
+def _fake_http_get(url, timeout=90, ua=None):
+    body = _FILES[url.rsplit("/", 1)[-1]]
+    if body is None:
+        raise OSError("simulated download failure")
+    return body
+C.http_get = _fake_http_get
+try:
+    hist, errs = C.bls_fetch_history({"CUSR0000SA0"}, files=["f_a", "f_b", "f_bad"])
+finally:
+    C.http_get = _orig_http_get
+
+pts = hist["CUSR0000SA0"]
+check("history: files merged, duplicate month not double-counted", len(pts) == 3)
+check("history: dates unique and sorted",
+      [p["date"] for p in pts] == ["2026-05", "2026-06", "2026-07"])
+check("history: new month from the later file is picked up", pts[-1]["value"] == 321.4)
+check("history: a failed file is survivable, not fatal", "CUSR0000SA0" in hist)
+check("history: the failed file is reported in errs", "f_bad" in errs)
+
+# --- every configured series must have BOTH ids resolvable to a name (no typos) -------
+_ids = {}
+for _s in C.SERIES:
+    _ids[_s["bls"]["sa"]] = _s["name"]; _ids[_s["bls"]["nsa"]] = _s["name"]
+check(f"config: {len(C.SERIES)} series -> {len(_ids)} distinct BLS ids, none blank",
+      all(k and k.startswith("CU") for k in _ids))
+check("config: required series present in SERIES", C.REQUIRED in [s["name"] for s in C.SERIES])
+
+print("\nALL TESTS PASSED — parsing, merge, multi-file history, and anti-clobber guard are proven.")

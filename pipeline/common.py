@@ -26,7 +26,20 @@ import os, io, csv, json, time, urllib.request, datetime
 
 OUT_PATH   = "data/cpi_series.json"
 FRED_CSV   = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={id}"
-BLS_CURRENT= "https://download.bls.gov/pub/time.series/cu/cu.data.0.Current"
+BLS_BASE   = "https://download.bls.gov/pub/time.series/cu/"
+BLS_CURRENT= BLS_BASE + "cu.data.0.Current"
+
+# Deep-history flat files. FRED's fredgraph.csv endpoint times out from GitHub Actions
+# runners (IP-level; browser and bot User-Agents fail identically), so history comes from
+# BLS instead. Verified: these nine files contain all 56 CU ids this pipeline needs, with
+# All Items back to 1947-01. A series may appear in SEVERAL files — merge_points dedupes
+# by date, so files must be merged, never concatenated.
+BLS_HISTORY_FILES = [
+    "cu.data.1.AllItems", "cu.data.2.Summaries", "cu.data.11.USFoodBeverage",
+    "cu.data.12.USHousing", "cu.data.13.USApparel", "cu.data.14.USTransportation",
+    "cu.data.15.USMedical", "cu.data.18.USOtherGoodsAndServices",
+    "cu.data.20.USCommoditiesServicesSpecial",
+]
 CONTACT    = os.environ.get("CONTACT_EMAIL", "macro-data-bot@example.com")
 # Per-source User-Agent. These two hosts have OPPOSITE bot policies and one shared UA
 # cannot satisfy both (this stalled the first v2 rebuild for 30+ min):
@@ -187,3 +200,26 @@ def fred_fetch(series_id):
 def bls_current_text():
     """Download the BLS 'Current' flat file once (recent years, all CU series)."""
     return http_get(BLS_CURRENT, timeout=180, ua=UA_BLS)
+
+def bls_fetch_history(wanted_ids, files=None, timeout=240):
+    """Download the BLS deep-history flat files and return
+    ({series_id: [{date,value}] merged+deduped across files}, {filename: error}).
+
+    A series can appear in more than one file (e.g. All Items is in AllItems,
+    Summaries AND CommoditiesServicesSpecial), so results are merged by date rather
+    than concatenated — otherwise every duplicated month lands in the output twice.
+    A single file failing is not fatal: whatever was retrieved still merges, and the
+    anti-clobber guard makes the final call on whether the result is good enough."""
+    wanted = set(wanted_ids)
+    out = {sid: [] for sid in wanted}
+    errs = {}
+    for fname in (files or BLS_HISTORY_FILES):
+        try:
+            text = http_get(BLS_BASE + fname, timeout=timeout, ua=UA_BLS)
+        except Exception as e:
+            errs[fname] = f"{type(e).__name__}: {e}"
+            continue
+        for sid, pts in parse_bls_flatfile(text, wanted).items():
+            if pts:
+                out[sid] = merge_points(out[sid], pts)
+    return out, errs
