@@ -22,7 +22,7 @@ Design principles (post-mortem of the v1 full-re-pull-every-run design):
 Network calls run ONLY on GitHub Actions (open internet). The parse_* / merge / guard
 functions are pure and unit-tested offline (see test_pipeline.py).
 """
-import os, io, csv, json, time, urllib.request, datetime
+import os, io, csv, json, time, hashlib, urllib.request, datetime
 
 OUT_PATH   = "data/cpi_series.json"
 FRED_CSV   = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={id}"
@@ -56,9 +56,10 @@ UA_FRED    = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 UA         = UA_BLS            # back-compat for any caller not passing one
 FRED_TIMEOUT = 25              # was 90; fail fast, we have a fallback
 FRED_MAX_FAILS = 6             # circuit breaker: stop hammering a dead/tarpitting host
-MIN_OK      = 20       # anti-clobber: require at least this many series with SA data
 MIN_HISTORY = 500      # required series must have at least this many SA months
 REQUIRED    = "All Items"
+# NOTE: MIN_OK and REGRESSION_TOL are defined AFTER the SERIES list below — MIN_OK is
+# derived from len(SERIES) and would NameError if placed here.
 
 # --- series map -------------------------------------------------------------------
 # fred: FRED id or None (None -> fetch from BLS flat file). bls: {"sa","nsa"} CU ids.
@@ -107,6 +108,12 @@ SERIES = [
 ]
 BY_NAME = {s["name"]: s for s in SERIES}
 
+# Anti-clobber thresholds. MIN_OK is derived from the series map so it tracks additions
+# automatically: at most 2 of the defined series may be transiently missing SA data.
+# (Defined here, not with the other constants, because it needs len(SERIES).)
+MIN_OK         = max(20, len(SERIES) - 2)
+REGRESSION_TOL = 1     # months of slack on per-series history length vs the last commit
+
 # --- pure parsers (unit-tested offline) -------------------------------------------
 def parse_fred_csv(text):
     """FRED fredgraph.csv -> [{'date':'YYYY-MM','value':float}] (monthly)."""
@@ -153,12 +160,19 @@ def merge_points(existing, incoming):
     for p in (incoming or []): m[p["date"]] = p["value"]
     return [{"date": k, "value": m[k]} for k in sorted(m)]
 
-def guard(master):
-    """Anti-clobber: return (ok, reason). Never write over good data with a bad fetch.
-    Also rejects a SHALLOW fetch (e.g., transient FRED failure that left only recent
-    BLS data) so it can't clobber deep history the percentiles depend on."""
+def series_hash(master):
+    """SHA-256 over canonical JSON of the `series` object ONLY (sorted keys).
+    Excludes meta.* on purpose — generated_utc/guard/diagnostics change every run
+    and must NOT count as a data change."""
+    blob = json.dumps(master.get("series", {}), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+def guard(master, prior=None):
+    """(ok, reason). Absolute floors + regression-vs-prior.
+    prior = last committed master (load_master(path)); None skips the regression pass."""
     series = master.get("series", {})
     req = series.get(REQUIRED, {})
+    # --- absolute floors: a shallow/degraded fetch can never pass ---
     if not req.get("sa"):
         return False, f"required series '{REQUIRED}' missing/empty"
     if len(req["sa"]) < MIN_HISTORY:
@@ -166,13 +180,36 @@ def guard(master):
     n_ok = sum(1 for v in series.values() if v.get("sa"))
     if n_ok < MIN_OK:
         return False, f"only {n_ok} series have SA data (need >= {MIN_OK})"
+    # --- regression floor: never accept a fetch that lost ground vs the last good commit ---
+    if prior and prior.get("series"):
+        p_series = prior["series"]
+        p_ok = sum(1 for v in p_series.values() if v.get("sa"))
+        if n_ok < p_ok:
+            return False, f"series regression: {n_ok} SA series now vs {p_ok} in last commit"
+        p_req = p_series.get(REQUIRED, {}).get("sa") or []
+        if len(req["sa"]) < len(p_req) - REGRESSION_TOL:
+            return False, (f"'{REQUIRED}' history shrank: {len(req['sa'])} vs {len(p_req)} months "
+                           f"(tol {REGRESSION_TOL})")
+        for name, pv in p_series.items():
+            pn = len(pv.get("sa") or [])
+            nn = len(series.get(name, {}).get("sa") or [])
+            if pn and nn < pn - REGRESSION_TOL:
+                return False, f"series '{name}' SA truncated: {nn} vs {pn} months (was in last commit)"
     return True, f"{n_ok} series OK, {REQUIRED}={len(req['sa'])} months"
 
 def save_guarded(master, path=OUT_PATH):
-    ok, reason = guard(master)
-    master.setdefault("meta", {})["guard"] = reason
+    prior = load_master(path)                       # last committed good file (or empty)
+    ok, reason = guard(master, prior)
+    new_hash = series_hash(master)
+    m = master.setdefault("meta", {})
+    m["guard"] = reason
+    m["series_hash"] = new_hash
     if not ok:
         raise SystemExit(f"ABORT (anti-clobber): {reason} — refusing to overwrite {path}")
+    if prior.get("meta", {}).get("series_hash") == new_hash:
+        # series identical to last commit -> do NOT rewrite: meta.generated_utc doesn't
+        # churn, so `git diff --staged --quiet` is truly empty and commit-only-on-change holds.
+        return f"UNCHANGED (series_hash match) — {reason}"
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f: json.dump(master, f, separators=(",", ":"))
     return reason

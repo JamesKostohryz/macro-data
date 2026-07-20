@@ -4,6 +4,7 @@ test_pipeline.py — offline proof of the pure logic (no network). Run: python t
 Feeds realistic samples of the ACTUAL BLS flat-file and FRED CSV formats through the
 parsers, merge, and anti-clobber guard, and asserts correct behavior.
 """
+import json
 import common as C
 
 def check(name, cond):
@@ -96,4 +97,53 @@ check(f"config: {len(C.SERIES)} series -> {len(_ids)} distinct BLS ids, none bla
       all(k and k.startswith("CU") for k in _ids))
 check("config: required series present in SERIES", C.REQUIRED in [s["name"] for s in C.SERIES])
 
-print("\nALL TESTS PASSED — parsing, merge, multi-file history, and anti-clobber guard are proven.")
+# --- regression guard: never accept a fetch that lost ground vs the last commit -------
+def _master(n_series, req_months, extra_len=None):
+    m = {"series": {C.REQUIRED: {"sa": [{"date": str(1947 + i // 12) + f"-{i%12+1:02d}", "value": 1.0}
+                                        for i in range(req_months)]}}}
+    for i in range(n_series):
+        m["series"][f"s{i}"] = {"sa": [{"date": "2026-06", "value": 1.0}] * (extra_len or 1)}
+    return m
+
+_prior = _master(C.MIN_OK + 2, 953)
+ok, why = C.guard(_master(C.MIN_OK + 2, 953), _prior)
+check("regression: identical-to-prior passes", ok)
+
+ok, why = C.guard(_master(C.MIN_OK - 1, 953), _prior)          # lost several series
+check(f"regression: REJECTS dropped series ({why})", not ok)
+
+ok, why = C.guard(_master(C.MIN_OK + 2, 620), _prior)          # 953 -> 620 truncation
+check(f"regression: REJECTS truncated All Items ({why})", not ok)
+
+ok, why = C.guard(_master(C.MIN_OK + 2, 953 - C.REGRESSION_TOL), _prior)
+check("regression: tolerates a 1-month boundary wobble", ok)
+
+ok, why = C.guard(_master(C.MIN_OK + 2, 954), _prior)          # grew by a month
+check("regression: a longer history passes", ok)
+
+# a series present before that comes back short must be caught even if counts are fine
+_short = _master(C.MIN_OK + 2, 953)
+_prior_long = _master(C.MIN_OK + 2, 953, extra_len=10)
+ok, why = C.guard(_short, _prior_long)
+check(f"regression: REJECTS per-series truncation ({why})", not ok)
+
+# --- series_hash / idempotent write-skip ---------------------------------------------
+import tempfile, os as _os
+_a = _master(C.MIN_OK + 2, 953)
+_b = json.loads(json.dumps(_a))                       # deep copy, identical series
+_b["meta"] = {"generated_utc": "different-every-run"} # meta churn must NOT count
+check("hash: ignores meta churn", C.series_hash(_a) == C.series_hash(_b))
+_c = json.loads(json.dumps(_a)); _c["series"]["s0"]["sa"][0]["value"] = 2.0
+check("hash: detects a real series change", C.series_hash(_a) != C.series_hash(_c))
+
+_tmp = _os.path.join(tempfile.mkdtemp(), "cpi_series.json")
+r1 = C.save_guarded(json.loads(json.dumps(_a)), _tmp)
+_mtime1 = _os.path.getmtime(_tmp)
+r2 = C.save_guarded(json.loads(json.dumps(_a)), _tmp)          # same series, second run
+check(f"idempotence: second identical run skips the write ({r2[:24]}...)",
+      r2.startswith("UNCHANGED") and _os.path.getmtime(_tmp) == _mtime1)
+r3 = C.save_guarded(json.loads(json.dumps(_c)), _tmp)          # genuinely changed series
+check("idempotence: a real change still writes", not r3.startswith("UNCHANGED"))
+
+print("\nALL TESTS PASSED — parsing, merge, multi-file history, anti-clobber guard,\n"
+      "regression floor, and idempotent write-skip are proven.")
