@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 test_pipeline.py — offline proof of the pure logic (no network). Run: python test_pipeline.py
-Feeds realistic samples of the ACTUAL BLS flat-file and FRED CSV formats through the
+Feeds realistic samples of the ACTUAL BLS flat-file format through the
 parsers, merge, and anti-clobber guard, and asserts correct behavior.
 """
 import json
@@ -10,13 +10,6 @@ import common as C
 def check(name, cond):
     print(("PASS" if cond else "FAIL") + "  " + name)
     assert cond, name
-
-# --- FRED CSV format (real shape: 'observation_date,<ID>', '.' = missing) ---------
-FRED_SAMPLE = "observation_date,CPIAUCSL\n2026-04-01,319.500\n2026-05-01,320.100\n2026-06-01,.\n"
-fred = C.parse_fred_csv(FRED_SAMPLE)
-check("FRED: parses 2 valid monthly points (skips '.')", len(fred) == 2)
-check("FRED: dates are YYYY-MM", fred[0]["date"] == "2026-04" and fred[1]["date"] == "2026-05")
-check("FRED: value is float", fred[0]["value"] == 319.5)
 
 # --- BLS flat file (tab-delimited, space-padded series_id, M13 annual must skip) ---
 BLS_SAMPLE = (

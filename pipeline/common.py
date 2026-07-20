@@ -3,14 +3,15 @@
 common.py — shared core for the macro-data CPI pipeline (v2, incremental + keyless).
 
 Two runners import this:
-  * rebuild_history.py — full keyless rebuild of the master (FRED CSV; BLS flat files
-    for series FRED doesn't carry). Grabs EVERYTHING → absorbs revisions. Off-peak.
+  * rebuild_history.py — full keyless rebuild of the master from the BLS deep-history
+    flat files. Grabs EVERYTHING → absorbs revisions. Off-peak.
   * fetch_release.py   — release-morning: pull the BLS bulk flat file (timely, keyless),
     patch the newest month(s) into the master. Light.
 
 Design principles (post-mortem of the v1 full-re-pull-every-run design):
   * KEYLESS sources only — no API keys, so crossed/expired/quota'd secrets can't take
-    the pipeline down. FRED CSV (fredgraph.csv) and BLS bulk flat files.
+    the pipeline down. BLS bulk flat files only (FRED's fredgraph.csv is IP-blocked
+    from GitHub Actions runners, so it is not used at all).
   * INCREMENTAL routine; full rebuild is a separate deliberate job.
   * ANTI-CLOBBER guard — never overwrite the master with a degraded fetch.
   * SELF-DIAGNOSING — per-series status written into meta.diagnostics in the committed
@@ -22,10 +23,9 @@ Design principles (post-mortem of the v1 full-re-pull-every-run design):
 Network calls run ONLY on GitHub Actions (open internet). The parse_* / merge / guard
 functions are pure and unit-tested offline (see test_pipeline.py).
 """
-import os, io, csv, json, time, hashlib, urllib.request, datetime
+import os, json, time, hashlib, urllib.request, datetime
 
 OUT_PATH   = "data/cpi_series.json"
-FRED_CSV   = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={id}"
 BLS_BASE   = "https://download.bls.gov/pub/time.series/cu/"
 BLS_CURRENT= BLS_BASE + "cu.data.0.Current"
 
@@ -45,66 +45,58 @@ BLS_HISTORY_FILES = [
 # unset, so .get()'s default never fires. That shipped a UA of "(+contact: )" to BLS,
 # which 403s it — nine instant rejections and an anti-clobber abort in half a second.
 CONTACT    = os.environ.get("CONTACT_EMAIL") or "macro-data-bot@example.com"
-# Per-source User-Agent. These two hosts have OPPOSITE bot policies and one shared UA
-# cannot satisfy both (this stalled the first v2 rebuild for 30+ min):
-#   BLS  — 403s browser-like agents; REQUIRES an identifying bot UA with contact info.
-#   FRED — fredgraph.csv sits behind CDN bot protection that tarpits unknown agents
-#          (connection accepted, bytes trickled, client hangs) rather than rejecting.
+# BLS 403s browser-like agents and REQUIRES an identifying bot UA carrying contact info.
+# (A missing CONTACT_EMAIL secret yields an empty contact and an instant 403 — see below.)
 UA_BLS     = f"macro-data-pipeline/2.0 (+contact: {CONTACT})"
-UA_FRED    = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-UA         = UA_BLS            # back-compat for any caller not passing one
-FRED_TIMEOUT = 25              # was 90; fail fast, we have a fallback
-FRED_MAX_FAILS = 6             # circuit breaker: stop hammering a dead/tarpitting host
+UA         = UA_BLS            # sole User-Agent; BLS is the only source
 MIN_HISTORY = 500      # required series must have at least this many SA months
 REQUIRED    = "All Items"
 # NOTE: MIN_OK and REGRESSION_TOL are defined AFTER the SERIES list below — MIN_OK is
 # derived from len(SERIES) and would NameError if placed here.
 
 # --- series map -------------------------------------------------------------------
-# fred: FRED id or None (None -> fetch from BLS flat file). bls: {"sa","nsa"} CU ids.
+# bls: {"sa","nsa"} CU ids, derived from the item code.
 # role: "aggregate" needs deep history (percentiles); "detail" feeds Figures 4-6.
 def _cu(code): return {"sa": f"CUSR0000{code}", "nsa": f"CUUR0000{code}"}
-def S(name, fred_sa, fred_nsa, code, role):
-    return {"name":name, "fred":({"sa":fred_sa,"nsa":fred_nsa} if fred_sa else None),
-            "bls":_cu(code), "role":role}
+def S(name, code, role):
+    return {"name":name, "bls":_cu(code), "role":role}
 
 SERIES = [
-    # aggregate tree (deep history; all on FRED)
-    S("All Items",       "CPIAUCSL","CPIAUCNS","SA0","aggregate"),
-    S("Core",            "CPILFESL","CPILFENS","SA0L1E","aggregate"),
-    S("Food",            "CPIUFDSL","CPIUFDNS","SAF1","aggregate"),
-    S("Energy",          "CPIENGSL","CPIENGNS","SA0E","aggregate"),
-    S("Core Goods",      "CUSR0000SACL1E","CUUR0000SACL1E","SACL1E","aggregate"),
-    S("Core Services",   "CUSR0000SASLE","CUUR0000SASLE","SASLE","aggregate"),
-    S("Housing Services","CUSR0000SAH1","CUUR0000SAH1","SAH1","aggregate"),
-    # detailed items (Figures 4/5/6). FRED where it carries them; else None -> BLS.
-    S("Owner's equivalent rent","CUSR0000SEHC","CUUR0000SEHC","SEHC","detail"),
-    S("Rent of primary residence","CUSR0000SEHA","CUUR0000SEHA","SEHA","detail"),
+    # aggregate tree (deep history)
+    S("All Items","SA0","aggregate"),
+    S("Core","SA0L1E","aggregate"),
+    S("Food","SAF1","aggregate"),
+    S("Energy","SA0E","aggregate"),
+    S("Core Goods","SACL1E","aggregate"),
+    S("Core Services","SASLE","aggregate"),
+    S("Housing Services","SAH1","aggregate"),
+    # detailed items (Figures 4/5/6).
+    S("Owner's equivalent rent","SEHC","detail"),
+    S("Rent of primary residence","SEHA","detail"),
     # legacy aliases: v1 emitted these two names and the report engine may still read
     # them. Same underlying ids as the two entries above; kept so the rebuild (which
     # writes the series dict from scratch) cannot drop keys the engine depends on.
-    S("Owners Equiv Rent","CUSR0000SEHC","CUUR0000SEHC","SEHC","detail"),
-    S("Rent Primary Res","CUSR0000SEHA","CUUR0000SEHA","SEHA","detail"),
-    S("Lodging away from home","CUSR0000SEHB","CUUR0000SEHB","SEHB","detail"),
-    S("Airline fares","CUSR0000SETG01","CUUR0000SETG01","SETG01","detail"),
-    S("Motor vehicle insurance",None,None,"SETE","detail"),          # not on FRED
-    S("Motor vehicle maintenance and repair","CUSR0000SETD","CUUR0000SETD","SETD","detail"),
-    S("Physicians' services",None,None,"SEMC01","detail"),           # not on FRED
-    S("Hospital services",None,None,"SEMD01","detail"),              # exact sub-item: BLS only
-    S("Water, sewer and trash","CUSR0000SEHG","CUUR0000SEHG","SEHG","detail"),
-    S("Tobacco and smoking products","CUSR0000SEGA","CUUR0000SEGA","SEGA","detail"),
-    S("New vehicles","CUSR0000SETA01","CUUR0000SETA01","SETA01","detail"),
-    S("Used cars and trucks","CUSR0000SETA02","CUUR0000SETA02","SETA02","detail"),
-    S("Apparel","CPIAPPSL","CPIAPPNS","SAA","detail"),               # FRED fix
-    S("Medical care commodities","CUSR0000SAM1","CUUR0000SAM1","SAM1","detail"),
-    S("Alcoholic beverages",None,None,"SAF116","detail"),            # not on FRED
-    S("Gasoline (all types)","CUSR0000SETB01","CUUR0000SETB01","SETB01","detail"),
-    S("Electricity","CUSR0000SEHF01","CUUR0000SEHF01","SEHF01","detail"),
-    S("Utility (piped) gas service","CUSR0000SEHF02","CUUR0000SEHF02","SEHF02","detail"),
-    S("Fuel oil",None,None,"SEHE01","detail"),                       # exact sub-item: BLS only
-    S("Food at home","CUSR0000SAF11","CUUR0000SAF11","SAF11","detail"),
-    S("Food away from home","CUSR0000SEFV","CUUR0000SEFV","SEFV","detail"),
+    S("Owners Equiv Rent","SEHC","detail"),
+    S("Rent Primary Res","SEHA","detail"),
+    S("Lodging away from home","SEHB","detail"),
+    S("Airline fares","SETG01","detail"),
+    S("Motor vehicle insurance","SETE","detail"),
+    S("Motor vehicle maintenance and repair","SETD","detail"),
+    S("Physicians' services","SEMC01","detail"),
+    S("Hospital services","SEMD01","detail"),
+    S("Water, sewer and trash","SEHG","detail"),
+    S("Tobacco and smoking products","SEGA","detail"),
+    S("New vehicles","SETA01","detail"),
+    S("Used cars and trucks","SETA02","detail"),
+    S("Apparel","SAA","detail"),
+    S("Medical care commodities","SAM1","detail"),
+    S("Alcoholic beverages","SAF116","detail"),
+    S("Gasoline (all types)","SETB01","detail"),
+    S("Electricity","SEHF01","detail"),
+    S("Utility (piped) gas service","SEHF02","detail"),
+    S("Fuel oil","SEHE01","detail"),
+    S("Food at home","SAF11","detail"),
+    S("Food away from home","SEFV","detail"),
 ]
 BY_NAME = {s["name"]: s for s in SERIES}
 
@@ -115,19 +107,6 @@ MIN_OK         = max(20, len(SERIES) - 2)
 REGRESSION_TOL = 1     # months of slack on per-series history length vs the last commit
 
 # --- pure parsers (unit-tested offline) -------------------------------------------
-def parse_fred_csv(text):
-    """FRED fredgraph.csv -> [{'date':'YYYY-MM','value':float}] (monthly)."""
-    rows = []
-    rdr = csv.reader(io.StringIO(text))
-    header = next(rdr, None)
-    for r in rdr:
-        if len(r) < 2: continue
-        d, v = r[0].strip(), r[1].strip()
-        if v in (".", ""): continue
-        try: rows.append({"date": d[:7], "value": float(v)})
-        except ValueError: continue
-    return rows
-
 def parse_bls_flatfile(text, wanted_ids):
     """BLS cu.data.* (tab-delimited: series_id year period value footnotes)
     -> {series_id: [{'date':'YYYY-MM','value':float}]} for wanted_ids only.
@@ -219,24 +198,6 @@ def http_get(url, timeout=90, ua=None):
     req = urllib.request.Request(url, headers={"User-Agent": ua or UA})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
-
-_fred_consecutive_fails = [0]
-
-def fred_fetch(series_id):
-    """Fetch one FRED series. Opens a circuit breaker after FRED_MAX_FAILS consecutive
-    failures so a dead/tarpitting FRED costs ~2.5 min instead of ~75 min of timeouts;
-    callers already catch per-series and fall back to the BLS flat file."""
-    if _fred_consecutive_fails[0] >= FRED_MAX_FAILS:
-        raise RuntimeError(f"FRED circuit breaker open ({_fred_consecutive_fails[0]} "
-                           f"consecutive failures) — skipping, will fall back to BLS")
-    try:
-        rows = parse_fred_csv(http_get(FRED_CSV.format(id=series_id),
-                                       timeout=FRED_TIMEOUT, ua=UA_FRED))
-        _fred_consecutive_fails[0] = 0
-        return rows
-    except Exception:
-        _fred_consecutive_fails[0] += 1
-        raise
 
 def bls_current_text():
     """Download the BLS 'Current' flat file once (recent years, all CU series)."""
