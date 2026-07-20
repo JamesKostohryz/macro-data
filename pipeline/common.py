@@ -28,7 +28,17 @@ OUT_PATH   = "data/cpi_series.json"
 FRED_CSV   = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={id}"
 BLS_CURRENT= "https://download.bls.gov/pub/time.series/cu/cu.data.0.Current"
 CONTACT    = os.environ.get("CONTACT_EMAIL", "macro-data-bot@example.com")
-UA         = f"macro-data-pipeline/2.0 (+contact: {CONTACT})"
+# Per-source User-Agent. These two hosts have OPPOSITE bot policies and one shared UA
+# cannot satisfy both (this stalled the first v2 rebuild for 30+ min):
+#   BLS  — 403s browser-like agents; REQUIRES an identifying bot UA with contact info.
+#   FRED — fredgraph.csv sits behind CDN bot protection that tarpits unknown agents
+#          (connection accepted, bytes trickled, client hangs) rather than rejecting.
+UA_BLS     = f"macro-data-pipeline/2.0 (+contact: {CONTACT})"
+UA_FRED    = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+UA         = UA_BLS            # back-compat for any caller not passing one
+FRED_TIMEOUT = 25              # was 90; fail fast, we have a fallback
+FRED_MAX_FAILS = 6             # circuit breaker: stop hammering a dead/tarpitting host
 MIN_OK      = 20       # anti-clobber: require at least this many series with SA data
 MIN_HISTORY = 500      # required series must have at least this many SA months
 REQUIRED    = "All Items"
@@ -151,14 +161,29 @@ def save_guarded(master, path=OUT_PATH):
     return reason
 
 # --- network (Actions only) -------------------------------------------------------
-def http_get(url, timeout=90):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+def http_get(url, timeout=90, ua=None):
+    req = urllib.request.Request(url, headers={"User-Agent": ua or UA})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
 
+_fred_consecutive_fails = [0]
+
 def fred_fetch(series_id):
-    return parse_fred_csv(http_get(FRED_CSV.format(id=series_id)))
+    """Fetch one FRED series. Opens a circuit breaker after FRED_MAX_FAILS consecutive
+    failures so a dead/tarpitting FRED costs ~2.5 min instead of ~75 min of timeouts;
+    callers already catch per-series and fall back to the BLS flat file."""
+    if _fred_consecutive_fails[0] >= FRED_MAX_FAILS:
+        raise RuntimeError(f"FRED circuit breaker open ({_fred_consecutive_fails[0]} "
+                           f"consecutive failures) — skipping, will fall back to BLS")
+    try:
+        rows = parse_fred_csv(http_get(FRED_CSV.format(id=series_id),
+                                       timeout=FRED_TIMEOUT, ua=UA_FRED))
+        _fred_consecutive_fails[0] = 0
+        return rows
+    except Exception:
+        _fred_consecutive_fails[0] += 1
+        raise
 
 def bls_current_text():
     """Download the BLS 'Current' flat file once (recent years, all CU series)."""
-    return http_get(BLS_CURRENT, timeout=180)
+    return http_get(BLS_CURRENT, timeout=180, ua=UA_BLS)

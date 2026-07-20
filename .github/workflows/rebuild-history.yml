@@ -16,9 +16,16 @@ on:
 permissions:
   contents: write
 
+# Only one rebuild at a time; a newer push supersedes an in-flight run (they would
+# otherwise race to commit data/).
+concurrency:
+  group: rebuild-history
+  cancel-in-progress: true
+
 jobs:
   rebuild:
     runs-on: ubuntu-latest
+    timeout-minutes: 20        # hard ceiling: never grind toward the 6h default again
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

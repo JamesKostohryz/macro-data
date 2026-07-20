@@ -14,9 +14,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: refresh-release
+  cancel-in-progress: true
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
