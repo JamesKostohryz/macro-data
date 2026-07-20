@@ -167,11 +167,19 @@ def merge_points(existing, incoming):
     for p in (incoming or []): m[p["date"]] = p["value"]
     return [{"date": k, "value": m[k]} for k in sorted(m)]
 
+# Keys inside each series that are provenance, not data. They MUST be excluded from the
+# hash: rebuild_history stamps sa_source="BLS:CUSR0000SA0" while fetch_release stamps
+# "BLS:CUSR0000SA0 (release patch)". Hashing them made the two jobs disagree forever, so
+# every run committed even when not one number had moved.
+_HASH_IGNORE = ("sa_source", "nsa_source", "role")
+
 def series_hash(master):
-    """SHA-256 over canonical JSON of the `series` object ONLY (sorted keys).
-    Excludes meta.* on purpose — generated_utc/guard/diagnostics change every run
-    and must NOT count as a data change."""
-    blob = json.dumps(master.get("series", {}), sort_keys=True, separators=(",", ":"))
+    """SHA-256 over the DATA in `series` — the sa/nsa {date,value} arrays only.
+    Excludes meta.* (generated_utc/guard/diagnostics churn every run) and the per-series
+    provenance keys in _HASH_IGNORE. Answers 'did any number change?', nothing else."""
+    data = {name: {k: v for k, v in obj.items() if k not in _HASH_IGNORE}
+            for name, obj in (master.get("series") or {}).items()}
+    blob = json.dumps(data, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 def guard(master, prior=None):

@@ -138,5 +138,17 @@ check(f"idempotence: second identical run skips the write ({r2[:24]}...)",
 r3 = C.save_guarded(json.loads(json.dumps(_c)), _tmp)          # genuinely changed series
 check("idempotence: a real change still writes", not r3.startswith("UNCHANGED"))
 
+# provenance labels must NOT count as a data change: rebuild_history stamps
+# sa_source="BLS:X" and fetch_release stamps "BLS:X (release patch)". Hashing those made
+# the two jobs disagree forever, so every scheduled run committed an identical file.
+_p1 = _master(C.MIN_OK + 2, 953)
+_p2 = json.loads(json.dumps(_p1))
+for _n, _v in _p2["series"].items():
+    _v["sa_source"] = "BLS:SOMETHING (release patch)"; _v["role"] = "detail"
+check("hash: provenance/source labels do not count as a data change",
+      C.series_hash(_p1) == C.series_hash(_p2))
+_p3 = json.loads(json.dumps(_p1)); _p3["series"][C.REQUIRED]["sa"][-1]["value"] = 999.9
+check("hash: a real value change is still detected", C.series_hash(_p1) != C.series_hash(_p3))
+
 print("\nALL TESTS PASSED — parsing, merge, multi-file history, anti-clobber guard,\n"
       "regression floor, and idempotent write-skip are proven.")
