@@ -31,13 +31,14 @@ BLS_CURRENT= BLS_BASE + "cu.data.0.Current"
 
 # Deep-history flat files. FRED's fredgraph.csv endpoint times out from GitHub Actions
 # runners (IP-level; browser and bot User-Agents fail identically), so history comes from
-# BLS instead. Verified: these nine files contain all 56 CU ids this pipeline needs, with
+# BLS instead. Verified: these files contain every CU id this pipeline needs, with
 # All Items back to 1947-01. A series may appear in SEVERAL files — merge_points dedupes
 # by date, so files must be merged, never concatenated.
 BLS_HISTORY_FILES = [
     "cu.data.1.AllItems", "cu.data.2.Summaries", "cu.data.11.USFoodBeverage",
     "cu.data.12.USHousing", "cu.data.13.USApparel", "cu.data.14.USTransportation",
-    "cu.data.15.USMedical", "cu.data.18.USOtherGoodsAndServices",
+    "cu.data.15.USMedical", "cu.data.16.USRecreation",
+    "cu.data.17.USEducationAndCommunication", "cu.data.18.USOtherGoodsAndServices",
     "cu.data.20.USCommoditiesServicesSpecial",
 ]
 # NOTE: `or`, not os.environ.get(key, default). A GitHub Actions step that references a
@@ -97,6 +98,33 @@ SERIES = [
     S("Fuel oil","SEHE01","detail"),
     S("Food at home","SAF11","detail"),
     S("Food away from home","SEFV","detail"),
+    # --- widened Figure-6 coverage (Top Movers). These have no relative-importance
+    # weight in the engine's DETAIL_META, so they feed Figure 6 ONLY and are excluded
+    # from the weighted contribution figures (4/5). Adding a weight there promotes an
+    # item into 4/5 automatically.
+    S("Eggs","SEFH","detail"),
+    S("Window coverings","SEHH02","detail"),
+    S("Breakfast cereal","SEFA02","detail"),
+    S("Other bakery products","SEFB04","detail"),
+    S("Uncooked ground beef","SEFC01","detail"),
+    S("Uncooked beef steaks","SEFC03","detail"),
+    S("Pork chops","SEFD03","detail"),
+    S("Fresh fish and seafood","SEFG01","detail"),
+    S("Milk","SEFJ01","detail"),
+    S("Canned fruits and vegetables","SEFM01","detail"),
+    S("Coffee","SEFP01","detail"),
+    S("Full service meals and snacks","SEFV01","detail"),
+    S("Footwear","SEAE","detail"),
+    S("Jewelry and watches","SEAG","detail"),
+    S("College tuition and fees","SEEB01","detail"),
+    S("Computers and peripherals","SEEE01","detail"),
+    S("Internet services","SEEE03","detail"),
+    S("Toys","SERE01","detail"),
+    S("Personal care products","SEGB","detail"),
+    S("Major appliances","SEHK01","detail"),
+    S("Laundry and dry cleaning services","SEGD03","detail"),
+    S("Pets and pet products","SERB01","detail"),
+    S("Pet services including veterinary","SERB02","detail"),
 ]
 BY_NAME = {s["name"]: s for s in SERIES}
 
