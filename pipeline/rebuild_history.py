@@ -60,14 +60,21 @@ def main():
                        "diagnostics": diags},
               "series": out}
 
-    reason = C.save_guarded(master)   # aborts (no write) if degraded
+    # Diagnose BEFORE the guard. save_guarded() raises SystemExit on a degraded fetch,
+    # so anything printed after it is lost precisely when it is most needed — an abort
+    # used to say only "All Items missing/empty" with no hint as to why.
     empty = [n for n, v in out.items() if not v["sa"]]
-    print(f"rebuild_history OK — {reason}")
-    print(f"series: {len(out)} | All Items months: {len(out[C.REQUIRED]['sa'])}")
+    print(f"UA contact: {C.CONTACT!r}")
+    print(f"series: {len(out)} | All Items months: {len(out.get(C.REQUIRED, {}).get('sa', []))}")
+    if file_errs:
+        print("FILE ERRORS:", json.dumps(file_errs, indent=2))
     if empty:
         print("EMPTY series (need item-code fix):", empty)
     if diags:
         print("diagnostics:", json.dumps(diags))
+
+    reason = C.save_guarded(master)   # aborts (no write) if degraded
+    print(f"rebuild_history OK — {reason}")
 
 
 if __name__ == "__main__":

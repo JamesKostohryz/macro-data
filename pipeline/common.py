@@ -40,7 +40,11 @@ BLS_HISTORY_FILES = [
     "cu.data.15.USMedical", "cu.data.18.USOtherGoodsAndServices",
     "cu.data.20.USCommoditiesServicesSpecial",
 ]
-CONTACT    = os.environ.get("CONTACT_EMAIL", "macro-data-bot@example.com")
+# NOTE: `or`, not os.environ.get(key, default). A GitHub Actions step that references a
+# secret which does not exist sets the env var to the EMPTY STRING rather than leaving it
+# unset, so .get()'s default never fires. That shipped a UA of "(+contact: )" to BLS,
+# which 403s it — nine instant rejections and an anti-clobber abort in half a second.
+CONTACT    = os.environ.get("CONTACT_EMAIL") or "macro-data-bot@example.com"
 # Per-source User-Agent. These two hosts have OPPOSITE bot policies and one shared UA
 # cannot satisfy both (this stalled the first v2 rebuild for 30+ min):
 #   BLS  — 403s browser-like agents; REQUIRES an identifying bot UA with contact info.
