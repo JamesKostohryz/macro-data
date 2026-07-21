@@ -1,0 +1,61 @@
+name: Refresh PCE (release-day, keyless)
+
+# BEA publishes the monthly PCE price index at 8:30 ET, typically on the last business
+# day of the month. Unlike BLS, BEA ships full history AND the new month in one file
+# (NipaDataM.txt), which it rewrites at the release instant — verified last-modified
+# "Thu, 25 Jun 2026 12:30:02 GMT" on the May-PCE release day. So there is no
+# rebuild-vs-patch split for PCE: this single job does both.
+#
+# Keyless: no API key, no registration, no repo secret required. CONTACT_EMAIL only
+# sets a courtesy User-Agent and has a working default if the secret does not exist.
+# (NOTE: a workflow referencing a non-existent secret sets the env var to the EMPTY
+# STRING, so pce_common uses `or`, never os.environ.get(k, default).)
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["pipeline/pce_*.py", "pipeline/fetch_pce.py"]
+  schedule:
+    # The release day floats with the calendar (last business day), so we sweep days
+    # 23-31 rather than a fixed window. 8:30 ET is 12:30 UTC in summer (EDT) and 13:30
+    # UTC in winter (EST); we fire across both and take whichever run first sees fresh
+    # data. GitHub's scheduler routinely lags 5-15 min under load, so the earliest crons
+    # will often be no-ops — that is fine. save_guarded() skips the write when the
+    # series hash is unchanged, so a run that finds nothing new commits nothing.
+    - cron: "32 12 23-31 * *"   # summer (EDT): ~2 min after the print
+    - cron: "42 12 23-31 * *"
+    - cron: "52 12 23-31 * *"
+    - cron: "05 13 23-31 * *"
+    - cron: "32 13 23-31 * *"   # winter (EST): ~2 min after the print
+    - cron: "42 13 23-31 * *"
+    - cron: "52 13 23-31 * *"
+    - cron: "05 14 23-31 * *"   # final safety net
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-pce
+  cancel-in-progress: true
+
+jobs:
+  pce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Self-test (offline, no network)
+        run: python pipeline/test_pce.py
+      - name: Fetch BEA NIPA monthly file and rebuild pce_series.json
+        env:
+          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+        run: python pipeline/fetch_pce.py data/pce_series.json
+      - name: Commit if changed
+        run: |
+          git config user.name  "pce-data-bot"
+          git config user.email "pce-data-bot@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then echo "No change."; else
+            git commit -m "data: PCE refresh ($(date -u +%F))"; git push; fi
