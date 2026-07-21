@@ -297,7 +297,26 @@ def save_guarded(master, path=OUT_PATH):
     if not ok:
         raise SystemExit(f"ABORT (anti-clobber): {reason} — refusing to overwrite {path}")
     if prior.get("meta", {}).get("series_hash") == new_hash:
-        return f"UNCHANGED (series_hash match) — {reason}"
+        # Data is byte-identical to the last commit, so do NOT rewrite: generated_utc
+        # would churn and "commit only on change" would never hold.
+        #
+        # EXCEPTION — provenance. meta.source / source_last_modified describe WHERE the
+        # committed numbers came from, and the executor can read committed files but not
+        # Actions logs, so a stale label is actively misleading. (Bootstrap case: the
+        # first pce_series.json was built from a local copy of the BEA file, then the
+        # first Action run fetched from BEA, got identical data, skipped the write, and
+        # left the file claiming "local:...". Data right, label wrong.) These fields are
+        # stable between real releases, so refreshing them when they differ does not
+        # reintroduce per-run churn.
+        pm = prior.get("meta", {})
+        drift = {k: m.get(k) for k in ("source", "source_last_modified")
+                 if m.get(k) != pm.get(k)}
+        if not drift:
+            return f"UNCHANGED (series_hash match) — {reason}"
+        merged = dict(prior)
+        merged["meta"] = {**pm, **drift, "guard": reason, "series_hash": new_hash}
+        with open(path, "w") as f: json.dump(merged, f, separators=(",", ":"))
+        return (f"UNCHANGED data; refreshed provenance ({', '.join(drift)}) — {reason}")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f: json.dump(master, f, separators=(",", ":"))
     return reason
